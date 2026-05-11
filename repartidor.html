@@ -1,0 +1,1409 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Panel de Repartidor</title>
+
+<!-- Firebase SDKs -->
+<script type="module">
+
+  // ══════════════════════════════════════════════════
+  // 🐛 DEBUG LOGGER — todo aparece en consola Y en pantalla
+  // ══════════════════════════════════════════════════
+  function log(msg, type = 'info', data = null) {
+    const prefix = { info: '🔵', warn: '🟡', error: '🔴', ok: '✅' }[type] || '⚪';
+    const full = `${prefix} [${new Date().toLocaleTimeString()}] ${msg}`;
+
+    // Consola del navegador (F12)
+    if (type === 'error') console.error(full, data ?? '');
+    else if (type === 'warn') console.warn(full, data ?? '');
+    else console.log(full, data ?? '');
+
+    // Panel visual en pantalla
+    const panel = document.getElementById('debugPanel');
+    if (panel) {
+      const line = document.createElement('div');
+      line.className = `dlog dlog-${type}`;
+      line.textContent = full + (data ? ' → ' + JSON.stringify(data).slice(0, 120) : '');
+      panel.appendChild(line);
+      panel.scrollTop = panel.scrollHeight;
+    }
+  }
+
+  log('📄 Script cargado — inicio de ejecución');
+
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+  import { getAuth, signInWithEmailAndPassword } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+  import { getFirestore, collection, doc, getDoc, getDocs, updateDoc, setDoc, query, where, onSnapshot, serverTimestamp, limit } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+  import { getDatabase, ref as dbRef, update as dbUpdate, remove as dbRemove } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+  log('📦 Imports de Firebase completados');
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyD09-5orwEdDThRloUQS8fhbvI8WPRpSY8",
+    authDomain: "real-de-plateros.firebaseapp.com",
+    databaseURL: "https://real-de-plateros-default-rtdb.firebaseio.com",
+    projectId: "real-de-plateros",
+    storageBucket: "real-de-plateros.firebasestorage.app",
+    messagingSenderId: "248575489591",
+    appId: "1:248575489591:web:a206ddaf1ced8bcedf31b2",
+    measurementId: "G-REB425WC20"
+  };
+
+  log('⚙️ Config Firebase definida', 'info', { project: firebaseConfig.projectId });
+
+  let app, db, rtdb, auth;
+  try {
+    app = initializeApp(firebaseConfig);
+    log('✅ Firebase App inicializada', 'ok');
+  } catch(e) {
+    log('🔴 ERROR al inicializar Firebase App: ' + e.message, 'error');
+  }
+
+  try {
+    auth = getAuth(app);
+    log('✅ Firebase Auth inicializado', 'ok');
+  } catch(e) {
+    log('🔴 ERROR al inicializar Auth: ' + e.message, 'error');
+  }
+
+  try {
+    db = getFirestore(app);
+    log('✅ Firestore inicializado', 'ok');
+  } catch(e) {
+    log('🔴 ERROR al inicializar Firestore: ' + e.message, 'error');
+  }
+
+  try {
+    rtdb = getDatabase(app);
+    log('✅ Realtime Database inicializado', 'ok');
+  } catch(e) {
+    log('🔴 ERROR al inicializar Realtime DB: ' + e.message, 'error');
+  }
+
+  // ── Login automático con cuenta web ──────────────────────────
+  const WEB_EMAIL    = 'admin.web@real-de-plateros.com';
+  const WEB_PASSWORD = 'AdminWeb2026';
+
+  async function loginAutomatico() {
+    try {
+      await signInWithEmailAndPassword(auth, WEB_EMAIL, WEB_PASSWORD);
+      log('✅ Login automático exitoso', 'ok');
+    } catch(e) {
+      log('🔴 ERROR en login automático: ' + e.message, 'error', { code: e.code });
+    }
+  }
+
+  // ── State ──────────────────────────────────────────────────────
+  let allPedidos = [];
+  let filtroSucursal = null;
+  let filtroEnvio = null;
+  let todasLasSucursales = [];
+  let unsubscribePedidos = null;
+  let timerInterval = null;
+  let modalPedido = null;
+
+  // ── URL Params (para modo sucursal con link) ───────────────────
+  const urlParams = new URLSearchParams(window.location.search);
+  const sucursalParam = urlParams.get('sucursal');
+  log('🔍 URL completa: ' + window.location.href);
+  log('🔍 URL params: sucursal=' + sucursalParam);
+
+  // ── Init ──────────────────────────────────────────────────────
+  window.addEventListener('DOMContentLoaded', async () => {
+    log('🟢 DOMContentLoaded disparado');
+
+    log('🌐 URL actual: ' + window.location.href);
+    log('🔍 Protocolo: ' + window.location.protocol);
+
+    if (sucursalParam) {
+      filtroSucursal = decodeURIComponent(sucursalParam);
+      log('📍 Param sucursal detectado: ' + filtroSucursal);
+      document.getElementById('sucursalInput').value = filtroSucursal;
+      document.getElementById('sucursalInput').disabled = true;
+      document.getElementById('sucursalInput').style.background = '#fff3e8';
+      document.getElementById('labelSucursal').textContent = '📍 ' + filtroSucursal;
+      document.getElementById('sucursalFilterGroup').style.display = 'none';
+      document.getElementById('sucursalBadge').textContent = filtroSucursal;
+      document.getElementById('sucursalBadge').style.display = 'inline-block';
+    } else {
+      log('ℹ️ Sin param de sucursal — modo normal');
+    }
+
+    log('🔐 Iniciando login automático...');
+    await loginAutomatico();
+
+    log('▶️ Llamando fetchPedidos()...');
+    fetchPedidos();
+    timerInterval = setInterval(actualizarTimers, 1000);
+    setupFilterListeners();
+    setupModal();
+    log('✅ Init completo');
+  });
+
+  // ── Fetch pedidos en tiempo real ──────────────────────────────
+  function fetchPedidos() {
+    log('🔄 fetchPedidos() iniciado');
+    document.getElementById('loadingOverlay').style.display = 'flex';
+
+    if (unsubscribePedidos) {
+      log('♻️ Cancelando listener anterior');
+      unsubscribePedidos();
+    }
+
+    if (!db) {
+      log('🔴 CRÍTICO: db es null/undefined — Firestore no inicializó', 'error');
+      showToast('Error: Firestore no inicializó', 'danger');
+      document.getElementById('loadingOverlay').style.display = 'none';
+      return;
+    }
+
+    log('📡 Construyendo query en colección "Repartidor" donde realizada == true');
+
+    let q;
+    try {
+      q = query(
+        collection(db, 'Repartidor'),
+        where('realizada', '==', true)
+      );
+      log('✅ Query construida correctamente');
+    } catch(e) {
+      log('🔴 ERROR construyendo query: ' + e.message, 'error');
+      document.getElementById('loadingOverlay').style.display = 'none';
+      return;
+    }
+
+    log('📡 Llamando onSnapshot()...');
+
+    try {
+      unsubscribePedidos = onSnapshot(q, (snapshot) => {
+        log('📥 onSnapshot callback recibido', 'ok');
+        log('📊 Total documentos en snapshot: ' + snapshot.size);
+
+        if (snapshot.empty) {
+          log('⚠️ Snapshot VACÍO — no hay documentos con realizada==true', 'warn');
+          log('💡 Verifica en Firebase que el campo se llama exactamente "realizada" y vale true (booleano, no string)', 'warn');
+        }
+
+        const sucursalesSet = new Set();
+        allPedidos = [];
+
+        snapshot.forEach((docSnap, i) => {
+          const data = { docId: docSnap.id, ...docSnap.data() };
+          log(`  📄 Doc [${i}] id=${docSnap.id}`, 'info', {
+            realizada: data.realizada,
+            estado: data.estado,
+            recogerTienda: data.recogerTienda,
+            tieneProd: Array.isArray(data.productos),
+            numProd: data.productos?.length,
+            email: data.email
+          });
+          allPedidos.push(data);
+          if (data.productos && Array.isArray(data.productos)) {
+            data.productos.forEach(p => {
+              if (p.sucrusal) {
+                sucursalesSet.add(p.sucrusal);
+                log(`    🏬 Sucursal encontrada: "${p.sucrusal}"`);
+              } else {
+                log(`    ⚠️ Producto sin campo "sucrusal": ` + JSON.stringify(p).slice(0,80), 'warn');
+              }
+            });
+          } else {
+            log(`  ⚠️ Doc ${docSnap.id} no tiene campo "productos" o no es array`, 'warn');
+          }
+        });
+
+        log('✅ Procesado snapshot — total pedidos: ' + allPedidos.length, 'ok');
+        log('🏬 Sucursales únicas: ' + Array.from(sucursalesSet).join(', '));
+
+        todasLasSucursales = Array.from(sucursalesSet).sort();
+        actualizarOpcionesSucursal();
+        aplicarFiltrosYRenderizar();
+        document.getElementById('loadingOverlay').style.display = 'none';
+        log('🎉 Render completado');
+
+      }, (err) => {
+        log('🔴 ERROR en onSnapshot: ' + err.message, 'error', { code: err.code });
+        log('💡 Posibles causas:', 'warn');
+        log('   1) Reglas de Firestore bloquean la lectura (sin autenticación)', 'warn');
+        log('   2) El nombre de la colección es diferente', 'warn');
+        log('   3) Sin conexión a internet', 'warn');
+        log('   4) CORS bloqueado por file://', 'warn');
+        document.getElementById('loadingOverlay').style.display = 'none';
+        showToast('Error: ' + err.message, 'danger');
+      });
+
+      log('✅ onSnapshot registrado correctamente');
+
+    } catch(e) {
+      log('🔴 ERROR INESPERADO al llamar onSnapshot: ' + e.message, 'error');
+      document.getElementById('loadingOverlay').style.display = 'none';
+    }
+  }
+
+  function actualizarOpcionesSucursal() {
+    const datalist = document.getElementById('sucursalesDatalist');
+    datalist.innerHTML = '<option value="Todos"></option>';
+    todasLasSucursales.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s;
+      datalist.appendChild(opt);
+    });
+  }
+
+  function aplicarFiltrosYRenderizar() {
+    let filtered = [...allPedidos];
+
+    if (filtroSucursal) {
+      filtered = filtered.filter(p => {
+        if (!p.productos) return false;
+        return p.productos.some(prod => prod.sucrusal === filtroSucursal);
+      });
+    }
+
+    if (filtroEnvio) {
+      if (filtroEnvio === 'Domicilio') {
+        filtered = filtered.filter(p => !p.recogerTienda);
+      } else if (filtroEnvio === 'Recoger en tienda') {
+        filtered = filtered.filter(p => p.recogerTienda === true);
+      }
+    }
+
+    renderPedidos(filtered);
+    document.getElementById('countBadge').textContent = filtered.length;
+  }
+
+  // ── Render lista ──────────────────────────────────────────────
+  function renderPedidos(pedidos) {
+    const container = document.getElementById('pedidosList');
+
+    if (pedidos.length === 0) {
+      container.innerHTML = `
+        <div class="empty-state">
+          <div class="empty-icon">📦</div>
+          <div class="empty-title">${allPedidos.length === 0 ? 'No hay pedidos pendientes' : 'Sin resultados para el filtro'}</div>
+          <div class="empty-sub">${allPedidos.length === 0 ? 'Los nuevos pedidos aparecerán aquí' : 'Prueba cambiando el filtro'}</div>
+        </div>`;
+      return;
+    }
+
+    container.innerHTML = pedidos.map((pedido, i) => buildPedidoCard(pedido, i)).join('');
+
+    // Attach click handlers
+    container.querySelectorAll('.pedido-card').forEach(card => {
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.whatsapp-btn')) return;
+        const docId = card.dataset.docid;
+        const pedido = allPedidos.find(p => p.docId === docId);
+        if (pedido) openModal(pedido);
+      });
+    });
+
+    container.querySelectorAll('.whatsapp-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const phone = btn.dataset.phone;
+        window.open(`https://wa.me/${phone}`, '_blank');
+      });
+    });
+  }
+
+  function getBorderStyle(pedido) {
+    if (pedido.retrasoActivo) return { border: '#9C27B0', bg: 'rgba(156,39,176,0.05)' };
+    if (pedido.recogerTienda) return { border: 'rgba(245,190,125,1)', bg: 'rgba(245,190,125,0.08)' };
+    if (pedido.enCamino) return { border: '#667eea', bg: 'rgba(102,126,234,0.06)' };
+    if (pedido.afuera) return { border: '#11998e', bg: 'rgba(17,153,142,0.06)' };
+    if (pedido.problema) return { border: '#fc4a1a', bg: 'rgba(252,74,26,0.06)' };
+    if (pedido.estado === 'Listo') return { border: '#56ab2f', bg: 'rgba(86,171,47,0.06)' };
+    return { border: '#ECF0F1', bg: '#ffffff' };
+  }
+
+  function buildPedidoCard(pedido, index) {
+    const style = getBorderStyle(pedido);
+    const esRecoger = pedido.recogerTienda === true;
+    const enCamino = pedido.enCamino === true;
+    const afuera = pedido.afuera === true;
+    const problema = pedido.problema === true;
+    const retraso = pedido.retrasoActivo === true;
+    const costoEnvio = !esRecoger && pedido.costoEnvio ? parseFloat(pedido.costoEnvio) || 0 : 0;
+    const total = (parseFloat(pedido.cantidad) || 0) + costoEnvio;
+    const tieneEstado = retraso || esRecoger || enCamino || afuera || problema || pedido.estado === 'Listo';
+
+    let estadoBadge = '';
+    if (retraso) estadoBadge = `<span class="badge badge-retraso">⏳ Retraso</span>`;
+    else if (enCamino) estadoBadge = `<span class="badge badge-camino">🚛 En Camino</span>`;
+    else if (afuera) estadoBadge = `<span class="badge badge-afuera">📍 Afuera</span>`;
+    else if (problema) estadoBadge = `<span class="badge badge-problema">⚠️ Problema</span>`;
+    else if (pedido.estado === 'Listo') estadoBadge = `<span class="badge badge-listo">✅ Listo</span>`;
+
+    let retrasoInfo = '';
+    if (retraso && pedido.retrasoHasta) {
+      const hasta = pedido.retrasoHasta.toDate ? pedido.retrasoHasta.toDate() : new Date(pedido.retrasoHasta);
+      const restante = Math.max(0, hasta - Date.now());
+      const min = Math.floor(restante / 60000);
+      const sec = Math.floor((restante % 60000) / 1000);
+      retrasoInfo = `<div class="retraso-timer" data-hasta="${hasta.toISOString()}">⏳ ${min}m ${sec}s restantes</div>`;
+    }
+
+    const sucursalBase = pedido.productos && pedido.productos[0] ? (pedido.productos[0].sucrusal || '') : '';
+
+    return `
+    <div class="pedido-card ${tieneEstado ? 'con-estado' : ''}" data-docid="${pedido.docId}"
+         style="border-color:${style.border}; border-width:${tieneEstado?'2px':'1px'}; background:${style.bg}">
+      <div class="card-inner">
+        <div class="card-icon ${esRecoger ? 'icon-store' : 'icon-delivery'}">
+          ${esRecoger ? '🏪' : '🛵'}
+        </div>
+        <div class="card-info">
+          <div class="card-header-row">
+            <span class="pedido-num">Pedido #${String(index+1).padStart(3,'0')}</span>
+            <span class="pedido-total">$${total.toFixed(2)}</span>
+          </div>
+          <div class="card-sub-row">
+            <span class="metodo-pago">${pedido.metodoPago || 'Método no especificado'}</span>
+            ${pedido.telefono ? `<button class="whatsapp-btn" data-phone="${pedido.telefono}">📱</button>` : ''}
+          </div>
+          ${costoEnvio > 0 ? `<div class="envio-row">🚚 Envío: $${costoEnvio.toFixed(2)}</div>` : ''}
+          ${sucursalBase ? `<div class="sucursal-row">🏬 ${sucursalBase}</div>` : ''}
+          ${estadoBadge}
+          ${retrasoInfo}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  // ── Timer update ──────────────────────────────────────────────
+  function actualizarTimers() {
+    document.querySelectorAll('.retraso-timer[data-hasta]').forEach(el => {
+      const hasta = new Date(el.dataset.hasta);
+      const restante = Math.max(0, hasta - Date.now());
+      const min = Math.floor(restante / 60000);
+      const sec = Math.floor((restante % 60000) / 1000);
+      el.textContent = `⏳ ${min}m ${sec}s restantes`;
+    });
+  }
+
+  // ── Filters ──────────────────────────────────────────────────
+  function setupFilterListeners() {
+    const sucursalInput = document.getElementById('sucursalInput');
+    const envioSelect = document.getElementById('envioSelect');
+
+    if (!sucursalParam) {
+      sucursalInput.addEventListener('input', (e) => {
+        const val = e.target.value.trim();
+        filtroSucursal = (val === '' || val === 'Todos') ? null : val;
+        aplicarFiltrosYRenderizar();
+      });
+      sucursalInput.addEventListener('change', (e) => {
+        const val = e.target.value.trim();
+        filtroSucursal = (val === '' || val === 'Todos') ? null : val;
+        aplicarFiltrosYRenderizar();
+      });
+    }
+
+    envioSelect.addEventListener('change', (e) => {
+      const val = e.target.value;
+      filtroEnvio = val === 'Todos' ? null : val;
+      aplicarFiltrosYRenderizar();
+    });
+
+    // Si viene de link, preseleccionar solo filtro envío
+    if (sucursalParam) {
+      // El filtro de envío muestra ambas opciones (Domicilio y Recoger)
+    }
+  }
+
+  // ── Modal ────────────────────────────────────────────────────
+  function setupModal() {
+    document.getElementById('modalClose').addEventListener('click', closeModal);
+    document.getElementById('modalOverlay').addEventListener('click', (e) => {
+      if (e.target === document.getElementById('modalOverlay')) closeModal();
+    });
+  }
+
+  function openModal(pedido) {
+    modalPedido = pedido;
+    renderModal(pedido);
+    document.getElementById('modalOverlay').style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+  }
+
+  function closeModal() {
+    document.getElementById('modalOverlay').style.display = 'none';
+    document.body.style.overflow = '';
+    modalPedido = null;
+  }
+
+  function renderModal(pedido) {
+    const esRecoger = pedido.recogerTienda === true;
+    const costoEnvio = !esRecoger && pedido.costoEnvio ? parseFloat(pedido.costoEnvio) || 0 : 0;
+    const total = (parseFloat(pedido.cantidad) || 0) + costoEnvio;
+    const sucursalBase = pedido.productos && pedido.productos[0] ? (pedido.productos[0].sucrusal || 'N/A') : 'N/A';
+    const promoDetails = pedido.promoDetails;
+    const descuento = promoDetails?.descuento || 0;
+    const tipoPromo = promoDetails?.tipo || '';
+    const puntosUsados = pedido.puntosUsados || 0;
+    const equivalePuntos = puntosUsados * 0.1;
+
+    const orderId = pedido.orderId ? pedido.orderId.toString() : 'N/A';
+    const orderIdCorto = orderId.length > 5 ? '...' + orderId.slice(-5) : orderId;
+
+    let productosHTML = '';
+    if (pedido.productos && pedido.productos.length > 0) {
+      productosHTML = pedido.productos.map(p => buildProductCard(p)).join('');
+    } else {
+      productosHTML = '<p style="color:#7F8C8D;text-align:center">Sin productos</p>';
+    }
+
+    let pagoExtra = '';
+    const metodoPago = (pedido.metodoPago || '').toLowerCase();
+    if (metodoPago.includes('efectivo') && pedido.montoPagado) {
+      const cambio = parseFloat(pedido.montoPagado) - total;
+      pagoExtra = `
+        <div class="info-box blue-box" style="margin-top:8px">
+          <div class="info-row"><span>Cliente paga con:</span><span>$${parseFloat(pedido.montoPagado).toFixed(2)}</span></div>
+          <div class="info-row"><span>Cambio a devolver:</span><span style="color:${cambio>0?'#E67E22':'#27AE60'}">$${cambio.toFixed(2)}</span></div>
+        </div>`;
+    }
+    if (metodoPago.includes('transferencia')) {
+      const confirmada = pedido.transferenciaConfirmada === true;
+      pagoExtra = `
+        <div class="info-row" style="margin-top:8px">
+          <span>Estado de Transferencia</span>
+          <span class="badge ${confirmada ? 'badge-listo' : 'badge-warning'}" id="transferBadge" onclick="toggleTransferencia('${pedido.docId}', ${confirmada})" style="cursor:pointer">
+            ${confirmada ? '✅ Confirmada' : '⏳ Pendiente'}
+          </span>
+        </div>`;
+    }
+
+    document.getElementById('modalContent').innerHTML = `
+      ${esRecoger ? `<div class="recoger-banner"><span>🏪</span><span>El cliente va a recoger en tienda</span></div>` : ''}
+
+      <div class="detail-section">
+        <div class="section-title">🛒 Productos Solicitados</div>
+        ${productosHTML}
+      </div>
+
+      ${promoDetails ? `
+      <div class="detail-section">
+        <div class="section-title">🏷️ Promociones Aplicadas</div>
+        ${promoDetails.promosPosibles ? `<div class="info-row"><span>Promociones aplicadas</span><span style="color:#27AE60">${promoDetails.promosPosibles}</span></div>` : ''}
+        ${tipoPromo ? `<div class="info-row"><span>Tipo de promoción</span><span style="color:#3498DB">${tipoPromo}</span></div>` : ''}
+        ${descuento ? `<div class="info-row"><span>Descuento total</span><span style="color:#E67E22">-$${parseFloat(descuento).toFixed(2)}</span></div>` : ''}
+      </div>` : ''}
+
+      <div class="detail-section">
+        <div class="section-title">🏬 Recoger en</div>
+        <div class="info-row"><span>Sucursal</span><span style="color:#9B59B6;font-weight:600">${sucursalBase}</span></div>
+      </div>
+
+      <div class="detail-section">
+        <div class="section-title">ℹ️ Información del Pedido</div>
+        <div class="info-row"><span>Número de orden</span><span style="color:#7F8C8D">${orderIdCorto}</span></div>
+        <div class="info-row"><span>Tipo de pedido</span><span style="color:${esRecoger?'#EE8A31':'#3498DB'}">${esRecoger ? 'Recoger en tienda' : 'Envío a domicilio'}</span></div>
+        ${costoEnvio > 0 ? `<div class="info-row"><span>Costo de envío</span><span style="color:#3498DB">$${costoEnvio.toFixed(2)}</span></div>` : ''}
+        <div class="info-row"><span>Total a Cobrar</span><span style="color:#27AE60;font-weight:700">$${total.toFixed(2)}</span></div>
+        <div class="info-row"><span>Método de pago</span><span>${pedido.metodoPago || 'N/A'}</span></div>
+        ${puntosUsados > 0 ? `<div class="info-row"><span>Puntos Paste2Go usados</span><span style="color:#27AE60">-$${equivalePuntos.toFixed(2)}</span></div>` : ''}
+        ${pagoExtra}
+      </div>
+
+      ${pedido.nombreCliente ? `
+      <div class="detail-section">
+        <div class="section-title">👤 Cliente</div>
+        <div class="info-row"><span>Nombre</span><span>${pedido.nombreCliente}</span></div>
+        ${pedido.telefono ? `<div class="info-row"><span>Teléfono</span><span><a href="https://wa.me/${pedido.telefono}" target="_blank" style="color:#25D366">📱 ${pedido.telefono}</a></span></div>` : ''}
+        ${pedido.email ? `<div class="info-row"><span>Email</span><span style="font-size:12px">${pedido.email}</span></div>` : ''}
+      </div>` : ''}
+
+      ${!esRecoger && pedido.direccion ? `
+      <div class="detail-section">
+        <div class="section-title">📍 Ruta de entrega</div>
+        <div class="ruta-step">
+          <div class="ruta-icon">📌</div>
+          <div>
+            <div style="font-weight:600;color:#2C3E50">Entregar a cliente</div>
+            <div style="color:#7F8C8D;font-size:13px">${pedido.direccion}</div>
+          </div>
+        </div>
+      </div>` : ''}
+
+      ${pedido.comentariop && pedido.comentariop.toString().trim() ? `
+      <div class="detail-section">
+        <div class="section-title">💬 Comentarios</div>
+        <p style="color:#2C3E50;margin:0">${pedido.comentariop}</p>
+      </div>` : ''}
+
+      <div class="action-buttons" id="actionButtons">
+        ${buildActionButtons(pedido)}
+      </div>
+    `;
+
+    // Attach action button handlers
+    attachActionHandlers(pedido);
+  }
+
+  function buildProductCard(producto) {
+    const isEvento = producto.tipo === 'evento';
+    const nombre = producto.titulo || producto.nombreEvento || 'Producto';
+    const cantidad = isEvento ? (producto.cantidadBoletos || producto.cantidad || 1) : (producto.cantidad || 1);
+    const cantidadLabel = isEvento ? `${cantidad} boletos` : `x${cantidad}`;
+    const colorClass = isEvento ? 'producto-evento' : 'producto-normal';
+
+    let extras = '';
+    if (isEvento) {
+      if (producto.fechaEvento) {
+        const d = producto.fechaEvento.toDate ? producto.fechaEvento.toDate() : new Date(producto.fechaEvento);
+        extras += `<div class="producto-detail">📅 ${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()}</div>`;
+      }
+      if (producto.horaEvento) extras += `<div class="producto-detail">🕐 ${producto.horaEvento}</div>`;
+      if (producto.categoria) extras += `<div class="producto-detail">🏷️ Categoría: ${producto.categoria}</div>`;
+    } else {
+      if (producto.preparado) extras += `<div class="producto-detail">👨‍🍳 Preparación: ${producto.preparado}</div>`;
+      if (producto.aditamentos && producto.aditamentos.length > 0) {
+        extras += '<div class="producto-specs">Especificaciones:';
+        producto.aditamentos.forEach(a => {
+          extras += `<div class="spec-item">• ${a.especificacion}: ${a.valor}</div>`;
+        });
+        extras += '</div>';
+      }
+    }
+
+    return `
+    <div class="producto-card ${colorClass}">
+      <div class="producto-header">
+        ${isEvento ? '<span class="evento-tag">EVENTO</span>' : ''}
+        <span class="producto-nombre">${nombre}</span>
+        <span class="cantidad-badge ${isEvento ? 'cantidad-evento' : ''}">${cantidadLabel}</span>
+      </div>
+      ${extras}
+    </div>`;
+  }
+
+  function buildActionButtons(pedido) {
+    const tieneEventos = pedido.productos && pedido.productos.some(p => p.tipo === 'evento');
+    const boletosAsignados = pedido.boletosAsignados === true;
+
+    let boletosBtn = '';
+    if (tieneEventos && !boletosAsignados) {
+      const count = contarBoletos(pedido);
+      boletosBtn = `
+        <button class="btn-full btn-boletos" id="btnBoletos">
+          🎫 Asignar Boletos <span class="boletos-count">${count}</span>
+        </button>`;
+    } else if (tieneEventos && boletosAsignados) {
+      boletosBtn = `<div class="boletos-ok">✅ Boletos ya asignados</div>`;
+    }
+
+    return `
+      ${boletosBtn}
+      <div class="actions-grid">
+        <button class="action-btn btn-camino" id="btnCamino">
+          <span class="btn-icon">🏍️</span>
+          <span>Camino</span>
+        </button>
+        <button class="action-btn btn-afuera" id="btnAfuera">
+          <span class="btn-icon">📍</span>
+          <span>Afuera</span>
+        </button>
+        <button class="action-btn btn-problema" id="btnProblema">
+          <span class="btn-icon">⚠️</span>
+          <span>Problema</span>
+        </button>
+        <button class="action-btn btn-retraso" id="btnRetraso">
+          <span class="btn-icon">⏳</span>
+          <span>Retraso</span>
+        </button>
+        <button class="action-btn btn-listo" id="btnListo">
+          <span class="btn-icon">✅</span>
+          <span>Listo</span>
+        </button>
+      </div>
+      <button class="btn-full btn-entregado" id="btnEntregado">
+        🎉 Marcar como Entregado
+      </button>`;
+  }
+
+  function contarBoletos(pedido) {
+    if (!pedido.productos) return 0;
+    return pedido.productos.reduce((sum, p) => {
+      if (p.tipo === 'evento') return sum + (p.cantidadBoletos || p.cantidad || 1);
+      return sum;
+    }, 0);
+  }
+
+  function attachActionHandlers(pedido) {
+    const btnCamino = document.getElementById('btnCamino');
+    const btnAfuera = document.getElementById('btnAfuera');
+    const btnProblema = document.getElementById('btnProblema');
+    const btnRetraso = document.getElementById('btnRetraso');
+    const btnListo = document.getElementById('btnListo');
+    const btnEntregado = document.getElementById('btnEntregado');
+    const btnBoletos = document.getElementById('btnBoletos');
+
+    if (btnCamino) btnCamino.onclick = () => handleEnCamino(pedido);
+    if (btnAfuera) btnAfuera.onclick = () => handleAfuera(pedido);
+    if (btnProblema) btnProblema.onclick = () => handleProblema(pedido);
+    if (btnRetraso) btnRetraso.onclick = () => handleRetraso(pedido);
+    if (btnListo) btnListo.onclick = () => handleListo(pedido.docId);
+    if (btnEntregado) btnEntregado.onclick = () => handleEntregado(pedido.docId);
+    if (btnBoletos) btnBoletos.onclick = () => handleAsignarBoletos(pedido);
+  }
+
+  // ── Actions ──────────────────────────────────────────────────
+  async function handleEnCamino(pedido) {
+    const docId = pedido.docId;
+    const clienteEmail = pedido.email;
+    try {
+      await setDoc(doc(db, clienteEmail, 'repartidor'), {
+        enCamino: true, afuera: false, problema: false,
+        retrasoActivo: false, retrasoMinutos: null, retrasoHasta: null,
+        estado: 'En Camino', frase: 'Tu pedido está en camino',
+        fechaActualizacion: serverTimestamp()
+      }, { merge: true });
+
+      await updateDoc(doc(db, 'Repartidor', docId), {
+        enCamino: true, afuera: false, problema: false,
+        retrasoActivo: false, retrasoMinutos: null, retrasoHasta: null,
+        estado: 'En Camino', fechaActualizacion: serverTimestamp()
+      });
+
+      await actualizarEstadoCliente(clienteEmail, pedido.orderId, 'En Camino');
+      await dbUpdate(dbRef(rtdb, `pedidos_activos/${docId}`), {
+        estado: 'En Camino', enCamino: true, afuera: false, problema: false,
+        retrasoActivo: false
+      });
+
+      showToast('Estado actualizado: En Camino', 'success');
+      closeModal();
+    } catch (e) {
+      console.error(e);
+      showToast('Error al actualizar estado', 'danger');
+    }
+  }
+
+  async function handleAfuera(pedido) {
+    const docId = pedido.docId;
+    const clienteEmail = pedido.email;
+    try {
+      await setDoc(doc(db, clienteEmail, 'repartidor'), {
+        afuera: true, enCamino: false, problema: false,
+        retrasoActivo: false, retrasoMinutos: null, retrasoHasta: null,
+        estado: 'Afuera', frase: 'Estoy afuera con tu pedido',
+        fechaActualizacion: serverTimestamp()
+      }, { merge: true });
+
+      await updateDoc(doc(db, 'Repartidor', docId), {
+        afuera: true, enCamino: false, problema: false,
+        retrasoActivo: false, retrasoMinutos: null, retrasoHasta: null,
+        estado: 'Afuera', fechaActualizacion: serverTimestamp()
+      });
+
+      await actualizarEstadoCliente(clienteEmail, pedido.orderId, 'Afuera');
+      await dbUpdate(dbRef(rtdb, `pedidos_activos/${docId}`), {
+        estado: 'Afuera', afuera: true, enCamino: false, problema: false
+      });
+
+      showToast('Cliente notificado: Afuera', 'success');
+      closeModal();
+    } catch (e) {
+      console.error(e);
+      showToast('Error al actualizar estado', 'danger');
+    }
+  }
+
+  async function handleProblema(pedido) {
+    const docId = pedido.docId;
+    const clienteEmail = pedido.email;
+    try {
+      await setDoc(doc(db, clienteEmail, 'repartidor'), {
+        problema: true, afuera: false, enCamino: false,
+        retrasoActivo: false, retrasoMinutos: null, retrasoHasta: null,
+        estado: 'Error', frase: 'Hay un problema con tu pedido, lo resolveremos en breve',
+        fechaActualizacion: serverTimestamp()
+      }, { merge: true });
+
+      await updateDoc(doc(db, 'Repartidor', docId), {
+        problema: true, afuera: false, enCamino: false,
+        retrasoActivo: false, retrasoMinutos: null, retrasoHasta: null,
+        estado: 'Error', fechaActualizacion: serverTimestamp()
+      });
+
+      await actualizarEstadoCliente(clienteEmail, pedido.orderId, 'Error');
+      await dbUpdate(dbRef(rtdb, `pedidos_activos/${docId}`), {
+        estado: 'Error', problema: true, afuera: false, enCamino: false
+      });
+
+      showToast('Estado actualizado: Problema', 'danger');
+      closeModal();
+    } catch (e) {
+      console.error(e);
+      showToast('Error al actualizar estado', 'danger');
+    }
+  }
+
+  async function handleRetraso(pedido) {
+    const minutos = await mostrarDialogoRetraso();
+    if (!minutos || minutos <= 0) return;
+
+    const docId = pedido.docId;
+    const clienteEmail = pedido.email;
+    const ahora = new Date();
+    const hasta = new Date(ahora.getTime() + minutos * 60000);
+
+    try {
+      await setDoc(doc(db, clienteEmail, 'repartidor'), {
+        retrasoActivo: true, estado: 'retraso', retrasoMinutos: minutos,
+        retrasoHasta: hasta, frase: `Tu pedido tiene un retraso de ${minutos} minutos`,
+        fechaActualizacion: serverTimestamp()
+      }, { merge: true });
+
+      await updateDoc(doc(db, 'Repartidor', docId), {
+        retrasoActivo: true, estado: 'retraso', retrasoMinutos: minutos,
+        retrasoHasta: hasta, fechaActualizacion: serverTimestamp()
+      });
+
+      await actualizarEstadoCliente(clienteEmail, pedido.orderId, 'retraso');
+      await dbUpdate(dbRef(rtdb, `pedidos_activos/${docId}`), {
+        estado: 'retraso', retrasoActivo: true, retrasoMinutos: minutos,
+        retrasoHasta: hasta.toISOString()
+      });
+
+      showToast(`Retraso de ${minutos} min notificado`, 'warning');
+      closeModal();
+    } catch (e) {
+      console.error(e);
+      showToast('Error al notificar retraso', 'danger');
+    }
+  }
+
+  async function handleListo(docId) {
+    try {
+      await updateDoc(doc(db, 'Repartidor', docId), {
+        estado: 'Listo', enCamino: false, afuera: false, problema: false,
+        retrasoActivo: false, retrasoMinutos: null, retrasoHasta: null,
+        fechaCompletado: serverTimestamp()
+      });
+
+      const pedidoSnap = await getDoc(doc(db, 'Repartidor', docId));
+      if (pedidoSnap.exists()) {
+        const d = pedidoSnap.data();
+        await actualizarEstadoCliente(d.email, d.orderId, 'Listo');
+        await dbUpdate(dbRef(rtdb, `pedidos_activos/${docId}`), { estado: 'Listo' });
+      }
+
+      showToast('Pedido marcado como Listo ✅', 'success');
+      closeModal();
+    } catch (e) {
+      console.error(e);
+      showToast('Error al actualizar estado', 'danger');
+    }
+  }
+
+  async function handleEntregado(docId) {
+    if (!confirm('¿Marcar este pedido como entregado? Esto lo eliminará de la lista.')) return;
+    try {
+      const pedidoSnap = await getDoc(doc(db, 'Repartidor', docId));
+      if (!pedidoSnap.exists()) { showToast('Pedido no encontrado', 'danger'); return; }
+
+      const d = pedidoSnap.data();
+      await updateDoc(doc(db, 'Repartidor', docId), {
+        realizada: false, estado: 'Entregado', fechaEntregado: serverTimestamp()
+      });
+
+      await actualizarEstadoCliente(d.email, d.orderId, 'Entregado');
+
+      // Actualizar puntos/compras
+      try {
+        const promoRef = doc(db, d.email, 'promociones');
+        const promoSnap = await getDoc(promoRef);
+        const pData = promoSnap.exists() ? promoSnap.data() : {};
+        const comprasActuales = pData.Compras || 0;
+        const puntosActuales = parseFloat(pData.Puntos) || 0;
+        const cantidad = parseFloat(d.cantidad) || 0;
+        await setDoc(promoRef, {
+          Compras: comprasActuales + 1,
+          Puntos: puntosActuales + (cantidad * 0.10),
+          ultimaActualizacion: serverTimestamp()
+        }, { merge: true });
+      } catch (e) { console.warn('Error actualizando promociones:', e); }
+
+      await dbRemove(dbRef(rtdb, `pedidos_activos/${docId}`));
+      await dbRemove(dbRef(rtdb, `cola_pedidos/${docId}`));
+
+      showToast('🎉 Pedido entregado exitosamente', 'success');
+      closeModal();
+    } catch (e) {
+      console.error(e);
+      showToast('Error al marcar como entregado', 'danger');
+    }
+  }
+
+  window.toggleTransferencia = async function(docId, currentStatus) {
+    try {
+      await updateDoc(doc(db, 'Repartidor', docId), { transferenciaConfirmada: !currentStatus });
+      showToast(!currentStatus ? 'Transferencia confirmada' : 'Transferencia pendiente', !currentStatus ? 'success' : 'warning');
+      const pedido = allPedidos.find(p => p.docId === docId);
+      if (pedido) {
+        pedido.transferenciaConfirmada = !currentStatus;
+        renderModal(pedido);
+        attachActionHandlers(pedido);
+      }
+    } catch(e) { showToast('Error al actualizar', 'danger'); }
+  };
+
+  async function actualizarEstadoCliente(email, orderId, nuevoEstado) {
+    try {
+      const q = query(
+        collection(db, email, 'vendidos', '0'),
+        where('orderId', '==', orderId),
+        limit(1)
+      );
+      const snap = await getDocs(q);
+      if (!snap.empty) {
+        await updateDoc(snap.docs[0].ref, {
+          estado: nuevoEstado, fechaActualizacion: serverTimestamp()
+        });
+      }
+    } catch(e) { console.warn('Error actualizando estado cliente:', e); }
+  }
+
+  // ── Diálogo retraso ───────────────────────────────────────────
+  function mostrarDialogoRetraso() {
+    return new Promise(resolve => {
+      document.getElementById('retrasoDialog').style.display = 'flex';
+      document.getElementById('retrasoInput').value = '';
+      document.getElementById('retrasoInput').focus();
+
+      document.getElementById('btnRetrasoConfirm').onclick = () => {
+        const val = parseInt(document.getElementById('retrasoInput').value);
+        if (val > 0) {
+          document.getElementById('retrasoDialog').style.display = 'none';
+          resolve(val);
+        } else {
+          showToast('Ingresa un número válido', 'warning');
+        }
+      };
+      document.getElementById('btnRetrasoCancel').onclick = () => {
+        document.getElementById('retrasoDialog').style.display = 'none';
+        resolve(null);
+      };
+    });
+  }
+
+  // ── Toast ─────────────────────────────────────────────────────
+  function showToast(msg, type = 'success') {
+    const toast = document.getElementById('toast');
+    toast.textContent = msg;
+    toast.className = `toast toast-${type} show`;
+    setTimeout(() => toast.classList.remove('show'), 3500);
+  }
+
+  // ── Boletos ───────────────────────────────────────────────────
+  async function handleAsignarBoletos(pedido) {
+    showToast('Funcionalidad de boletos disponible en la app móvil', 'warning');
+  }
+
+</script>
+
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: #F8F9FA;
+    color: #2C3E50;
+    min-height: 100vh;
+    padding-bottom: 48px; /* espacio para el panel debug */
+  }
+
+  /* ── AppBar ── */
+  .appbar {
+    background: linear-gradient(135deg, #EE8A31 0%, #F5BE7D 100%);
+    color: #fff;
+    padding: 0 16px;
+    height: 60px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-radius: 0 0 20px 20px;
+    box-shadow: 0 4px 12px rgba(238,138,49,0.3);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .appbar-title { font-size: 18px; font-weight: 700; letter-spacing: 0.3px; }
+  .appbar-badge {
+    background: rgba(255,255,255,0.25);
+    border-radius: 20px;
+    padding: 4px 12px;
+    font-size: 13px;
+    font-weight: 600;
+    display: none;
+  }
+
+  /* ── Filtros ── */
+  .filters-bar {
+    background: #FFFBF7;
+    border-bottom: 1px solid rgba(238,138,49,0.15);
+    padding: 10px 12px;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.04);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+  }
+  .filter-group { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+  .filter-label { font-size: 11px; font-weight: 600; color: #EE8A31; text-transform: uppercase; letter-spacing: 0.5px; }
+  .filter-input, .filter-select {
+    border: 1.5px solid #ECF0F1;
+    border-radius: 10px;
+    padding: 8px 10px;
+    font-size: 14px;
+    color: #2C3E50;
+    background: #fff;
+    outline: none;
+    transition: border-color 0.2s;
+    width: 100%;
+  }
+  .filter-input:focus, .filter-select:focus { border-color: #EE8A31; }
+  .count-chip {
+    background: linear-gradient(135deg, #EE8A31, #F5BE7D);
+    color: #fff;
+    border-radius: 50%;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 13px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 6px rgba(238,138,49,0.35);
+  }
+  .sucursal-badge {
+    display: none;
+    background: #EE8A31;
+    color: white;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 180px;
+  }
+
+  /* ── Lista pedidos ── */
+  .pedidos-container { padding: 14px; }
+
+  .pedido-card {
+    background: #fff;
+    border-radius: 14px;
+    border: 1px solid #ECF0F1;
+    margin-bottom: 12px;
+    cursor: pointer;
+    transition: transform 0.15s, box-shadow 0.15s;
+    overflow: hidden;
+  }
+  .pedido-card:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(0,0,0,0.08); }
+  .pedido-card:active { transform: scale(0.98); }
+  .card-inner { display: flex; align-items: flex-start; padding: 14px 16px; gap: 14px; }
+  .card-icon {
+    width: 46px; height: 46px;
+    border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+    background: rgba(238,138,49,0.12);
+    flex-shrink: 0;
+  }
+  .card-info { flex: 1; min-width: 0; }
+  .card-header-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+  .pedido-num { font-size: 15px; font-weight: 700; color: #2C3E50; }
+  .pedido-total { font-size: 16px; font-weight: 800; color: #27AE60; }
+  .card-sub-row { display: flex; align-items: center; gap: 8px; margin-bottom: 3px; }
+  .metodo-pago { font-size: 13px; color: #7F8C8D; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .whatsapp-btn {
+    background: #25D366; border: none; border-radius: 50%;
+    width: 26px; height: 26px; cursor: pointer;
+    font-size: 13px; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .envio-row, .sucursal-row { font-size: 12px; color: #7F8C8D; margin-top: 2px; }
+  .retraso-timer { font-size: 12px; color: #9C27B0; font-weight: 600; margin-top: 4px; }
+
+  /* ── Badges ── */
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 700;
+    margin-top: 4px;
+  }
+  .badge-retraso { background: rgba(156,39,176,0.12); color: #9C27B0; border: 1px solid #9C27B0; }
+  .badge-camino { background: rgba(102,126,234,0.12); color: #667eea; border: 1px solid #667eea; }
+  .badge-afuera { background: rgba(17,153,142,0.12); color: #11998e; border: 1px solid #11998e; }
+  .badge-problema { background: rgba(252,74,26,0.12); color: #fc4a1a; border: 1px solid #fc4a1a; }
+  .badge-listo { background: rgba(86,171,47,0.12); color: #56ab2f; border: 1px solid #56ab2f; }
+  .badge-warning { background: rgba(230,126,34,0.12); color: #E67E22; border: 1px solid #E67E22; }
+
+  /* ── Empty state ── */
+  .empty-state {
+    text-align: center;
+    padding: 60px 20px;
+    color: #7F8C8D;
+  }
+  .empty-icon { font-size: 64px; margin-bottom: 16px; opacity: 0.5; }
+  .empty-title { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+  .empty-sub { font-size: 14px; opacity: 0.7; }
+
+  /* ── Loading ── */
+  #loadingOverlay {
+    position: fixed; inset: 0; background: rgba(255,255,255,0.9);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 9999; flex-direction: column; gap: 16px;
+  }
+  .spinner {
+    width: 44px; height: 44px;
+    border: 4px solid #ECF0F1;
+    border-top-color: #EE8A31;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Modal ── */
+  #modalOverlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.5);
+    z-index: 1000;
+    align-items: flex-end;
+    justify-content: center;
+  }
+  .modal-sheet {
+    background: #fff;
+    border-radius: 24px 24px 0 0;
+    width: 100%;
+    max-width: 600px;
+    max-height: 92vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    animation: slideUp 0.3s ease-out;
+  }
+  @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+  .modal-header {
+    background: linear-gradient(135deg, #EE8A31, rgba(238,138,49,0.85));
+    padding: 16px 20px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-shrink: 0;
+  }
+  .modal-header-icon {
+    background: rgba(255,255,255,0.2);
+    border-radius: 12px;
+    width: 44px; height: 44px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 22px;
+  }
+  .modal-title { color: #fff; font-size: 20px; font-weight: 700; flex: 1; }
+  .modal-close {
+    background: rgba(255,255,255,0.2);
+    border: none; border-radius: 50%;
+    width: 36px; height: 36px;
+    color: #fff; font-size: 20px;
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  #modalContent { overflow-y: auto; padding: 16px; flex: 1; }
+
+  /* ── Modal sections ── */
+  .detail-section { margin-bottom: 20px; }
+  .section-title { font-size: 16px; font-weight: 700; color: #2C3E50; margin-bottom: 12px; display: flex; align-items: center; gap: 6px; }
+  .info-row {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    padding: 10px 12px; background: #F8F9FA; border-radius: 8px; margin-bottom: 6px;
+    font-size: 14px;
+  }
+  .info-row span:first-child { color: #7F8C8D; }
+  .info-row span:last-child { font-weight: 600; color: #2C3E50; text-align: right; max-width: 60%; }
+  .info-box { padding: 12px; border-radius: 10px; }
+  .blue-box { background: rgba(52,152,219,0.08); border: 1px solid rgba(52,152,219,0.3); }
+  .recoger-banner {
+    background: rgba(238,138,49,0.1);
+    border: 1px solid rgba(238,138,49,0.3);
+    border-radius: 12px;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 20px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #EE8A31;
+  }
+  .ruta-step { display: flex; gap: 12px; align-items: flex-start; padding: 12px; background: #F8F9FA; border-radius: 10px; }
+  .ruta-icon { font-size: 20px; }
+
+  /* ── Producto cards ── */
+  .producto-card {
+    border-radius: 10px;
+    padding: 14px;
+    margin-bottom: 10px;
+    border: 1px solid #ECF0F1;
+  }
+  .producto-normal { background: #fff; }
+  .producto-evento { background: #f9f3ff; border-color: #d7b8f5; }
+  .producto-header { display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+  .evento-tag {
+    background: #7B2FBE; color: #fff;
+    padding: 2px 8px; border-radius: 6px; font-size: 10px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .producto-nombre { flex: 1; font-size: 15px; font-weight: 700; color: #2C3E50; }
+  .cantidad-badge {
+    background: rgba(52,152,219,0.12); color: #3498DB;
+    padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 600;
+    flex-shrink: 0;
+  }
+  .cantidad-evento { background: rgba(123,47,190,0.12); color: #7B2FBE; }
+  .producto-detail { font-size: 12px; color: #7B2FBE; margin-top: 3px; }
+  .producto-specs { font-size: 13px; color: #7F8C8D; margin-top: 8px; }
+  .spec-item { padding-left: 8px; margin-top: 2px; }
+
+  /* ── Action buttons ── */
+  .action-buttons { margin-top: 8px; }
+  .actions-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .action-btn {
+    border: none; border-radius: 14px; cursor: pointer;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 4px; padding: 10px 4px; font-size: 11px; font-weight: 700;
+    color: #fff; height: 68px; transition: transform 0.15s, opacity 0.15s;
+    letter-spacing: 0.3px;
+  }
+  .action-btn:active { transform: scale(0.93); opacity: 0.85; }
+  .btn-icon { font-size: 20px; }
+  .btn-camino { background: linear-gradient(135deg, #667eea, #764ba2); box-shadow: 0 4px 10px rgba(102,126,234,0.35); }
+  .btn-afuera { background: linear-gradient(135deg, #11998e, #38ef7d); box-shadow: 0 4px 10px rgba(17,153,142,0.35); }
+  .btn-problema { background: linear-gradient(135deg, #fc4a1a, #f7b733); box-shadow: 0 4px 10px rgba(252,74,26,0.35); }
+  .btn-retraso { background: linear-gradient(135deg, #9C27B0, rgba(156,39,176,0.75)); box-shadow: 0 4px 10px rgba(156,39,176,0.35); }
+  .btn-listo { background: linear-gradient(135deg, #56ab2f, #a8e6cf); box-shadow: 0 4px 10px rgba(86,171,47,0.35); }
+  .btn-full {
+    width: 100%; border: none; border-radius: 14px; padding: 16px;
+    font-size: 16px; font-weight: 700; cursor: pointer; color: #fff;
+    margin-bottom: 10px; transition: transform 0.15s;
+  }
+  .btn-full:active { transform: scale(0.97); }
+  .btn-boletos { background: linear-gradient(135deg, #8E2DE2, #4A00E0); box-shadow: 0 4px 14px rgba(142,45,226,0.4); }
+  .btn-entregado { background: linear-gradient(135deg, #27AE60, #2ecc71); box-shadow: 0 4px 14px rgba(39,174,96,0.35); }
+  .boletos-count {
+    background: rgba(255,255,255,0.25); border-radius: 10px;
+    padding: 2px 8px; font-size: 12px; margin-left: 6px;
+  }
+  .boletos-ok {
+    background: rgba(39,174,96,0.1); border: 1px solid rgba(39,174,96,0.3);
+    border-radius: 12px; padding: 12px 16px;
+    color: #27AE60; font-weight: 600; text-align: center; margin-bottom: 10px;
+  }
+
+  /* ── Retraso dialog ── */
+  #retrasoDialog {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(0,0,0,0.6);
+    z-index: 2000;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+  }
+  .retraso-box {
+    background: #fff; border-radius: 20px;
+    padding: 28px 24px; width: 100%; max-width: 340px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+  }
+  .retraso-box h3 { font-size: 18px; font-weight: 700; margin-bottom: 12px; }
+  .retraso-box p { font-size: 14px; color: #7F8C8D; margin-bottom: 16px; }
+  #retrasoInput {
+    width: 100%; border: 2px solid #ECF0F1; border-radius: 12px;
+    padding: 12px 14px; font-size: 16px; outline: none;
+    transition: border-color 0.2s; margin-bottom: 20px;
+  }
+  #retrasoInput:focus { border-color: #9C27B0; }
+  .retraso-actions { display: flex; gap: 10px; }
+  #btnRetrasoCancel {
+    flex: 1; padding: 12px; border: 1px solid #ECF0F1; border-radius: 12px;
+    background: #fff; font-size: 15px; cursor: pointer; color: #7F8C8D; font-weight: 600;
+  }
+  #btnRetrasoConfirm {
+    flex: 2; padding: 12px; border: none; border-radius: 12px;
+    background: #9C27B0; color: #fff; font-size: 15px; cursor: pointer; font-weight: 700;
+  }
+
+  /* ── Toast ── */
+  .toast {
+    position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%) translateY(80px);
+    background: #2C3E50; color: #fff; padding: 12px 24px;
+    border-radius: 24px; font-size: 14px; font-weight: 600;
+    z-index: 3000; transition: transform 0.3s ease;
+    white-space: nowrap; box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+    max-width: 90vw; text-align: center;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); }
+  .toast-success { background: #27AE60; }
+  .toast-danger { background: #E74C3C; }
+  .toast-warning { background: #E67E22; }
+
+  /* ── Scroll ── */
+  .pedidos-container { overflow-y: auto; }
+
+  /* ══ DEBUG PANEL ══════════════════════════════════════════════ */
+  #debugContainer {
+    position: fixed;
+    bottom: 0; left: 0; right: 0;
+    background: #1a1a2e;
+    z-index: 9998;
+    font-family: monospace;
+    font-size: 11px;
+    border-top: 2px solid #EE8A31;
+    max-height: 55vh;
+    display: flex;
+    flex-direction: column;
+  }
+  #debugHeader {
+    padding: 8px 14px;
+    background: #16213e;
+    color: #EE8A31;
+    cursor: pointer;
+    user-select: none;
+    font-size: 13px;
+    flex-shrink: 0;
+  }
+  #debugPanel {
+    overflow-y: auto;
+    max-height: 38vh;
+    padding: 6px 8px;
+    flex: 1;
+  }
+  #debugFooter {
+    padding: 6px 12px;
+    background: #0f3460;
+    flex-shrink: 0;
+  }
+  .dlog {
+    padding: 2px 4px;
+    border-radius: 3px;
+    margin-bottom: 2px;
+    line-height: 1.5;
+    word-break: break-all;
+  }
+  .dlog-info  { color: #a8d8ea; }
+  .dlog-ok    { color: #a8e6cf; }
+  .dlog-warn  { color: #ffd3a5; background: rgba(255,200,100,0.08); }
+  .dlog-error { color: #ffb3b3; background: rgba(255,80,80,0.12); font-weight: bold; }
+</style>
+</head>
+<body>
+
+<!-- AppBar -->
+<div class="appbar">
+  <span class="appbar-title">🛵 Panel de Repartidor</span>
+  <div style="display:flex;align-items:center;gap:8px">
+    <span class="appbar-badge" id="sucursalBadge"></span>
+    <span class="count-chip" id="countBadge">0</span>
+  </div>
+</div>
+
+<!-- Filters -->
+<div class="filters-bar">
+  <div class="filter-group" id="sucursalFilterGroup">
+    <label class="filter-label" id="labelSucursal">Sucursal</label>
+    <input class="filter-input" id="sucursalInput" list="sucursalesDatalist"
+           placeholder="Todas las sucursales" autocomplete="off">
+    <datalist id="sucursalesDatalist"></datalist>
+  </div>
+  <div class="filter-group">
+    <label class="filter-label">Tipo de envío</label>
+    <select class="filter-select" id="envioSelect">
+      <option value="Todos">Todos</option>
+      <option value="Domicilio">Domicilio</option>
+      <option value="Recoger en tienda">Recoger en tienda</option>
+    </select>
+  </div>
+</div>
+
+<!-- Pedidos List -->
+<div class="pedidos-container" id="pedidosList">
+  <!-- rendered by JS -->
+</div>
+
+<!-- Loading -->
+<div id="loadingOverlay">
+  <div class="spinner"></div>
+  <span style="color:#7F8C8D;font-size:14px">Cargando pedidos...</span>
+</div>
+
+<!-- Modal Detalle Pedido -->
+<div id="modalOverlay">
+  <div class="modal-sheet">
+    <div class="modal-header">
+      <div class="modal-header-icon">🧾</div>
+      <span class="modal-title">Detalles del Pedido</span>
+      <button class="modal-close" id="modalClose">✕</button>
+    </div>
+    <div id="modalContent"></div>
+  </div>
+</div>
+
+<!-- Retraso Dialog -->
+<div id="retrasoDialog">
+  <div class="retraso-box">
+    <h3>⏳ Notificar retraso</h3>
+    <p>¿Cuántos minutos de retraso tendrá el pedido?</p>
+    <input type="number" id="retrasoInput" placeholder="Minutos" min="1">
+    <div class="retraso-actions">
+      <button id="btnRetrasoCancel">Cancelar</button>
+      <button id="btnRetrasoConfirm">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
+
+<!-- ══ DEBUG PANEL ══════════════════════════════════════════════ -->
+<div id="debugContainer">
+  <div id="debugHeader" onclick="toggleDebug()">
+    🐛 <strong>Panel de Debug</strong>
+    <span style="float:right;font-size:11px">Toca para mostrar/ocultar</span>
+  </div>
+  <div id="debugPanel" style="display:none"></div>
+  <div id="debugFooter" style="display:none">
+    <button onclick="clearDebug()" style="background:#E74C3C;color:#fff;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px">🗑 Limpiar</button>
+    <button onclick="copyDebug()" style="background:#3498DB;color:#fff;border:none;border-radius:6px;padding:4px 12px;cursor:pointer;font-size:12px;margin-left:8px">📋 Copiar todo</button>
+  </div>
+</div>
+
+<script>
+  function toggleDebug() {
+    const panel = document.getElementById('debugPanel');
+    const footer = document.getElementById('debugFooter');
+    const show = panel.style.display === 'none';
+    panel.style.display = show ? 'block' : 'none';
+    footer.style.display = show ? 'block' : 'none';
+  }
+  function clearDebug() { document.getElementById('debugPanel').innerHTML = ''; }
+  function copyDebug() {
+    const text = [...document.getElementById('debugPanel').querySelectorAll('.dlog')]
+      .map(el => el.textContent).join('\n');
+    navigator.clipboard.writeText(text).then(() => alert('¡Logs copiados al portapapeles!'));
+  }
+</script>
+</html>
